@@ -11,7 +11,7 @@ import pandas as pd
 from sklearn import preprocessing
 import matplotlib.pyplot as plt
 import seaborn as sns
-
+from datetime import datetime, timedelta
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -42,7 +42,7 @@ def get_parameters():
     parser = argparse.ArgumentParser(description='STGCN')
     parser.add_argument('--enable_cuda', type=bool, default=True, help='enable CUDA, default as True')
     parser.add_argument('--seed', type=int, default=42, help='set the random seed for stabilizing experiment results')
-    parser.add_argument('--dataset', type=str, default='pemsd7-m', choices=['metr-la', 'pems-bay', 'pemsd7-m'])
+    parser.add_argument('--dataset', type=str, default='md_cell', choices=['metr-la', 'pems-bay', 'pemsd7-m', 'md_cell'])
     parser.add_argument('--n_his', type=int, default=12)
     parser.add_argument('--n_pred', type=int, default=9, help='the number of time interval for predcition, default as 3')
     parser.add_argument('--time_intvl', type=int, default=5)
@@ -61,7 +61,7 @@ def get_parameters():
     parser.add_argument('--opt', type=str, default='nadamw', choices=['adamw', 'nadamw', 'lion'], help='optimizer, default as nadamw')
     parser.add_argument('--step_size', type=int, default=10)
     parser.add_argument('--gamma', type=float, default=0.95)
-    parser.add_argument('--patience', type=int, default=10, help='early stopping patience')
+    parser.add_argument('--patience', type=int, default=30, help='early stopping patience')
     parser.add_argument('--mode', type=str, default='test', choices=['train', 'test'])
     args = parser.parse_args()
     print('Training configs: {}'.format(args))
@@ -107,7 +107,7 @@ def data_preparate(args, device):
 
     dataset_path = './data'
     dataset_path = os.path.join(dataset_path, args.dataset)
-    data_col = pd.read_csv(os.path.join(dataset_path, 'vel.csv')).shape[0]
+    data_col = pd.read_csv(os.path.join(dataset_path, 'count.csv')).shape[0]
     # recommended dataset split rate as train: val: test = 60: 20: 20, 70: 15: 15 or 80: 10: 10
     # using dataset split rate as train: val: test = 70: 15: 15
     val_and_test_rate = 0.15
@@ -195,13 +195,11 @@ def val(model, val_iter):
         l_sum += l.item() * y.shape[0]
         n += y.shape[0]
     return torch.tensor(l_sum / n)
-
 @torch.no_grad() 
 def test(zscore, loss, model, test_iter, args):
     model.load_state_dict(torch.load("STGCN_" + args.dataset + ".pt"))
     model.eval()
 
-    # 테스트 데이터의 예측값과 실제값 저장을 위한 리스트
     predictions = []
     actual_values = []
 
@@ -210,62 +208,95 @@ def test(zscore, loss, model, test_iter, args):
         predictions.append(y_pred.cpu().numpy())
         actual_values.append(y.cpu().numpy())
     
-    # 리스트를 numpy 배열로 변환
     predictions = np.concatenate(predictions, axis=0)
     actual_values = np.concatenate(actual_values, axis=0)
 
-    # 정규화 된 값을 원래 스케일로 복원
     predictions = zscore.inverse_transform(predictions)
     actual_values = zscore.inverse_transform(actual_values)
 
-    # 테스트 메트릭 계산
     test_MSE = utility.evaluate_model(model, loss, test_iter)
     test_MAE, test_RMSE, test_WMAPE = utility.evaluate_metric(model, test_iter, zscore)
     print(f'Dataset {args.dataset:s} | Test loss {test_MSE:.6f} | MAE {test_MAE:.6f} | RMSE {test_RMSE:.6f} | WMAPE {test_WMAPE:.8f}')
 
-    # 시각화
-    plt.figure(figsize=(15, 5))
+    sensor_id = 0
+    samples_per_day = 288  # 5분 간격으로 하루 데이터
+    days_to_plot = 7
 
-    # 시계열 예측 비교 그래프
-    time_steps = np.arange(len(actual_values)) * args.time_intvl  # 5분 단위로 시간 생성
-    plt.plot(time_steps, actual_values[:, 0], label='Ground Truth', color='blue', alpha=0.5)
-    plt.plot(time_steps, predictions[:, 0], label='Prediction', color='red', alpha=0.5)
-    plt.title(f'Traffic Flow Prediction vs Ground Truth (First Sensor)')
-    plt.xlabel('Time (minutes)')
-    plt.ylabel('Traffic Flow')
-    plt.legend()
-    plt.grid(True)
+    def reshape_to_days(data):
+        n_days = len(data) // samples_per_day
+        return data[:n_days * samples_per_day].reshape(-1, samples_per_day)
 
-    # 그래프 저장
-    plt.tight_layout()
-    plt.savefig(f'prediction_results_{args.dataset}.png')
-    plt.close()
+    pred_days = reshape_to_days(predictions[:, sensor_id])
+    actual_days = reshape_to_days(actual_values[:, sensor_id])
 
-    # 오차 분석 그래프
-    plt.figure(figsize=(15, 5))
+    # 시간 조정을 위한 shift
+    shift_amount = int(5 * 12)  # 5시간 * 12(5분 간격)
+    for i in range(len(pred_days)):
+        pred_days[i] = np.roll(pred_days[i], -shift_amount)
+        actual_days[i] = np.roll(actual_days[i], -shift_amount)
 
-    # 오차 히스토그램
-    errors = predictions - actual_values
-    plt.subplot(1, 2, 1)
-    sns.histplot(errors[:, 0], kde=True)
-    plt.title('Error Distribution (First Sensor)')
-    plt.xlabel('Prediction Error')
-    plt.ylabel('Count')
+    # 시간 배열 생성
+    minutes_in_day = np.arange(0, 24*60, 5)  # 0분부터 1435분까지 5분 간격
+    time_points = minutes_in_day / 60  # 시간 단위로 변환
+    
+    # x축 눈금 설정
+    time_ticks = np.arange(0, 24, 2)  # 2시간 간격
+    time_labels = [f'{int(h):02d}:00' for h in time_ticks]
+    
+    for day in range(min(days_to_plot, len(pred_days))):
+        predictions_day = pred_days[day]
+        actual_values_day = actual_days[day]
+        
+        plt.figure(figsize=(15, 6))
+        
+        # 데이터 플로팅
+        plt.plot(time_points, actual_values_day, 'b-', label='Ground Truth', linewidth=2, alpha=0.7)
+        plt.plot(time_points, predictions_day, 'r--', label='Prediction', linewidth=2, alpha=0.7)
+        
+        plt.title(f'24-10-{day + 11} Crowd Count Prediction\nMyeongdong (Sensor {sensor_id})', fontsize=14)
+        plt.xlabel('Time (KST)', fontsize=12)
+        plt.ylabel('Crowd Count', fontsize=12)
+        plt.legend(fontsize=12)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        
+        # x축 설정
+        plt.xticks(time_ticks, time_labels)
 
-    # 시간대별 MAE
-    hourly_errors = np.abs(errors).mean(axis=1)
-    plt.subplot(1, 2, 2)
-    time_steps_error = np.arange(len(hourly_errors)) * args.time_intvl
-    plt.plot(time_steps_error, hourly_errors)
-    plt.title('MAE over Time')
-    plt.xlabel('Time (minutes)')
-    plt.ylabel('Mean Absolute Error')
+        # MAE 계산 및 표시 (6시간 단위)
+        period_hours = 6
+        periods_per_day = 24 // period_hours
+        for period in range(periods_per_day):
+            start_period = period * period_hours * 12
+            end_period = start_period + period_hours * 12
+            period_mae = np.mean(np.abs(predictions_day[start_period:end_period] - 
+                                      actual_values_day[start_period:end_period]))
+            
+            plt.text(period_hours/2 + period * period_hours, plt.ylim()[0] + (plt.ylim()[1] - plt.ylim()[0])*0.05,
+                    f'{period*period_hours:02d}-{(period+1)*period_hours:02d}h\nMAE: {period_mae:.1f}',
+                    ha='center', va='bottom', fontsize=9)
 
-    plt.tight_layout()
-    plt.savefig(f'error_analysis_{args.dataset}.png')
-    plt.close()
+        day_mae = np.mean(np.abs(predictions_day - actual_values_day))
+        plt.text(0.5, 0.95, f'Daily MAE: {day_mae:.2f}',
+                horizontalalignment='center',
+                transform=plt.gca().transAxes,
+                bbox=dict(facecolor='white', alpha=0.8, edgecolor='none'),
+                fontsize=12)
 
+        plt.tight_layout()
+        plt.savefig(f'city_day_{day+1}_prediction_{args.dataset}.png', dpi=300, bbox_inches='tight')
+        plt.close()
 
+        # Peak hour in KST
+        # Peak hour in KST
+        peak_hour = time_points[np.argmax(actual_values_day)]
+        # WMAPE 계산
+        day_wmape = np.sum(np.abs(predictions_day - actual_values_day)) / (np.sum(np.abs(actual_values_day)) + 1e-10) * 100
+
+        print(f'\nDay {day + 1} Statistics:')
+        print(f'Daily MAE: {day_mae:.2f}')
+        print(f'Daily WMAPE: {day_wmape:.2f}%')
+        print(f'Peak Hour: {int(peak_hour):02d}:{int((peak_hour % 1) * 60):02d}')
+        
 if __name__ == "__main__":
     # Logging
     # logger = logging.getLogger('stgcn')
