@@ -17,6 +17,8 @@ def load_adj(dataset_name):
         n_vertex = 325
     elif dataset_name == 'pemsd7-m':
         n_vertex = 228
+    elif dataset_name == 'md':
+        n_vertex = 404
     elif dataset_name == 'md_cell':
         n_vertex = 404
 
@@ -33,11 +35,17 @@ def load_data(dataset_name, len_train, len_val):
     return train, val, test
 
 def data_transform(data, n_his, n_pred, device):
-    # produce data slices for x_data and y_data
+    """시계열 데이터를 입력과 출력 형태로 변환합니다.
 
+    Args:
+        data: 이미 스케일링된 데이터
+        n_his: 입력으로 사용할 과거 시점의 수
+        n_pred: 예측할 미래 시점의 수
+        device: 텐서를 저장할 디바이스
+    """
     n_vertex = data.shape[1]
     len_record = len(data)
-    num = len_record - n_his - n_pred
+    num = len_record - n_his - n_pred + 1
 
     x = np.zeros([num, 1, n_his, n_vertex])
     y = np.zeros([num, n_vertex])
@@ -45,7 +53,7 @@ def data_transform(data, n_his, n_pred, device):
     for i in range(num):
         head = i
         tail = i + n_his
-        x[i, :, :, :] = data[head: tail].reshape(1, n_his, n_vertex)
-        y[i] = data[tail + n_pred - 1]  # 여기서 n_pred만큼 건너뛴 후의 값을 예측
-        
-    return torch.Tensor(x).to(device), torch.Tensor(y).to(device)
+        x[i, :, :, :] = data[head:tail].reshape(1, n_his, n_vertex)
+        y[i] = data[tail + n_pred - 1]
+
+    return torch.Tensor(x).to(device), torch.Tensor(y).to(device) 

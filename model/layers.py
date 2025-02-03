@@ -258,12 +258,6 @@ class STConvBlock(nn.Module):
         return x
 
 class OutputBlock(nn.Module):
-    # Output block contains 'TNFF' structure
-    # T: Gated Temporal Convolution Layer (GLU or GTU)
-    # N: Layer Normolization
-    # F: Fully-Connected Layer
-    # F: Fully-Connected Layer
-
     def __init__(self, Ko, last_block_channel, channels, end_channel, n_vertex, act_func, bias, droprate):
         super(OutputBlock, self).__init__()
         self.tmp_conv1 = TemporalConvLayer(Ko, last_block_channel, channels[0], n_vertex, act_func)
@@ -272,13 +266,16 @@ class OutputBlock(nn.Module):
         self.tc1_ln = nn.LayerNorm([n_vertex, channels[0]], eps=1e-12)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(p=droprate)
-
+        
     def forward(self, x):
         x = self.tmp_conv1(x)
         x = self.tc1_ln(x.permute(0, 2, 3, 1))
         x = self.fc1(x)
         x = self.relu(x)
         x = self.dropout(x)
+        
+        # 최종 레이어(fc2) 통과 후 -> Sigmoid로 0~1 범위로 제한
         x = self.fc2(x).permute(0, 3, 1, 2)
-
+        x = torch.sigmoid(x)  # <- 추가된 부분
+        
         return x
