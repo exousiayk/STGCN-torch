@@ -273,9 +273,7 @@ class OutputBlock(nn.Module):
         x = self.fc1(x)
         x = self.relu(x)
         x = self.dropout(x)
-        
-        # 최종 레이어(fc2) 통과 후 -> Sigmoid로 0~1 범위로 제한
         x = self.fc2(x).permute(0, 3, 1, 2)
-        x = torch.sigmoid(x)  # <- 추가된 부분
+        # x = torch.sigmoid(x)  # 활성화 함수 적용 
         
         return x

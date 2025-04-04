@@ -16,10 +16,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.utils as utils
-from scipy.signal import find_peaks  # 추가
 from script import dataloader, utility, earlystopping, opt
 from model import models
-from sklearn.preprocessing import MinMaxScaler
 
 def set_env(seed):
     # Set available CUDA devices
@@ -42,11 +40,11 @@ def get_parameters():
     parser.add_argument('--enable_cuda', type=bool, default=True, help='enable CUDA, default as True')
     parser.add_argument('--seed', type=int, default=42, help='set the random seed for stabilizing experiment results')
     parser.add_argument('--dataset', type=str, default='md', choices=['metr-la', 'pems-bay', 'pemsd7-m', 'md'])
-    parser.add_argument('--n_his', type=int, default=12)
+    parser.add_argument('--n_his', type=int, default=15)
     parser.add_argument('--n_pred', type=int, default=9, help='the number of time interval for predcition, default as 3')
     parser.add_argument('--time_intvl', type=int, default=5)
     parser.add_argument('--Kt', type=int, default=3)
-    parser.add_argument('--stblock_num', type=int, default=2)
+    parser.add_argument('--stblock_num', type=int, default=1)
     parser.add_argument('--act_func', type=str, default='glu', choices=['glu', 'gtu'])
     parser.add_argument('--Ks', type=int, default=3, choices=[3, 2])
     parser.add_argument('--graph_conv_type', type=str, default='cheb_graph_conv', choices=['cheb_graph_conv', 'graph_conv'])
@@ -61,7 +59,7 @@ def get_parameters():
     parser.add_argument('--step_size', type=int, default=10)
     parser.add_argument('--gamma', type=float, default=0.95)
     parser.add_argument('--patience', type=int, default=20, help='early stopping patience')
-    parser.add_argument('--mode', type=str, default='test', choices=['train', 'test'])
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
     args = parser.parse_args()
     print('Training configs: {}'.format(args))
 
@@ -118,13 +116,13 @@ def data_preparate(args, device):
     
     # 전체 데이터셋에 대해 하나의 스케일러를 학습시킵니다
     full_data = pd.concat([train, val, test])
-    minmax = MinMaxScaler(feature_range=(0, 1))  # 기본은 (0, 1)
-    minmax.fit(full_data)
+    zscore = preprocessing.StandardScaler()
+    zscore.fit(full_data)
     
     # 각 데이터셋을 동일한 스케일러로 변환합니다
-    train_scaled = minmax.transform(train)
-    val_scaled   = minmax.transform(val)
-    test_scaled  = minmax.transform(test)
+    train_scaled = zscore.transform(train)
+    val_scaled = zscore.transform(val)
+    test_scaled = zscore.transform(test)
 
     x_train, y_train = dataloader.data_transform(train_scaled, args.n_his, args.n_pred, device)
     x_val, y_val = dataloader.data_transform(val_scaled, args.n_his, args.n_pred, device)
@@ -137,7 +135,7 @@ def data_preparate(args, device):
     test_data = utils.data.TensorDataset(x_test, y_test)
     test_iter = utils.data.DataLoader(dataset=test_data, batch_size=args.batch_size, shuffle=False)
 
-    return n_vertex, minmax, train_iter, val_iter, test_iter
+    return n_vertex, zscore, train_iter, val_iter, test_iter
 
 def prepare_model(args, blocks, n_vertex):
     loss = nn.MSELoss()
@@ -223,9 +221,9 @@ def test(minmax, loss, model, test_iter, args):
     test_MAE, test_RMSE, test_WMAPE = utility.evaluate_metric(model, test_iter, minmax)
     print(f'Dataset {args.dataset:s} | Test loss {test_MSE:.6f} | MAE {test_MAE:.6f} | RMSE {test_RMSE:.6f} | WMAPE {test_WMAPE:.8f}')
 
-    sensor_id = 4
+    sensor_id = 216
     samples_per_day = 288  # 5분 간격으로 하루 데이터: 24시간 * 12
-    
+
     # 마지막 n 일치 데이터만 선택
     last_days = 15 * samples_per_day
     predictions = predictions[-last_days:]
@@ -254,26 +252,12 @@ def test(minmax, loss, model, test_iter, args):
         day_wmape = (np.sum(np.abs(predictions_day - actual_values_day)) /
                      (np.sum(np.abs(actual_values_day)) + 1e-10)) * 100
         
-        # 변화량(Δ)과 변화율(%) 계산
-        actual_changes = np.diff(actual_values_day)
-        actual_percentage_changes = actual_changes / actual_values_day[:-1]
-
-        # 변화량 기준(100명 이상)과 변화율 기준(10% 이상) 조합
-        absolute_threshold = 100  # 절대 변화량 기준
-        percentage_threshold = 0.1  # 변화율 기준
-        rapid_increase_indices = np.where(
-            (actual_changes > absolute_threshold) | (actual_percentage_changes > percentage_threshold)
-        )[0] +1 
-
         plt.figure(figsize=(15, 6))
         
         # 데이터 플로팅
         plt.plot(time_points, actual_values_day, 'b-', label='Ground Truth', linewidth=2, alpha=0.7)
         plt.plot(time_points, predictions_day, 'r--', label='Prediction', linewidth=2, alpha=0.7)
         
-        # 급격한 변화 구간 강조
-        plt.scatter(time_points[rapid_increase_indices], actual_values_day[rapid_increase_indices], 
-                    color='orange', label='Rapid Change Points', zorder=5)
 
         # Peak Time 탐지
         peak_index = np.argmax(actual_values_day)
@@ -320,7 +304,7 @@ def test(minmax, loss, model, test_iter, args):
         print(f'±1 Hour Around Peak WMAPE: {peak_wmape:.2f}%')
 
         plt.tight_layout()
-        plt.savefig(f'new_{sensor_id}_myeongdong_day {1+day}_events_{args.dataset}.png', dpi=300, bbox_inches='tight')
+        plt.savefig(f'1_{sensor_id}_myeongdong_day {1+day}_events_{args.dataset}.png', dpi=300, bbox_inches='tight')
         plt.close()
 
 @torch.no_grad()
@@ -395,12 +379,16 @@ if __name__ == "__main__":
     loss, es, model, optimizer, scheduler = prepare_model(args, blocks, n_vertex)
     if args.mode == 'train':
         train(args, model, loss, optimizer, scheduler, es, train_iter, val_iter)
-        test_daily_wmape(minmax, loss, model, test_iter, args)
+        # test_daily_wmape(minmax, loss, model, test_iter, args)
+        test(minmax, loss, model, test_iter, args)
     else:  # test mode
         if os.path.exists("STGCN_" + args.dataset + ".pt"):
-            test_daily_wmape(minmax, loss, model, test_iter, args)
-            
+            # test_daily_wmape(minmax, loss, model, test_iter, args)
+            test(minmax, loss, model, test_iter, args)
             # test(minmax, loss, model, test_iter, args)
         else:
             print(f"모델 파일이 없습니다. 먼저 학습을 진행해주세요.")
             print("실행 방법: python main.py --mode train")
+            
+            
+            
